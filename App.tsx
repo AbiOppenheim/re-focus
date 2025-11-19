@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { PDFDocument, rgb } from 'pdf-lib';
 
 interface WordItem {
   str: string;
@@ -750,6 +751,7 @@ const App: React.FC = () => {
   const scrollState = useRef({ ratio: 0.3, isAutoScrolling: false });
   const [selectionAnchor, setSelectionAnchor] = useState<{ page: number; word: number } | null>(null); // NEW
   const [highlightMode, setHighlightMode] = useState<'word' | 'phrase'>('word'); // NEW
+  const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null); // NEW: store raw PDF bytes
 
   // NEW: track visited/highlighted words per page (accumulative by section)
   // visitedWords[page] = { section: number | null, indices: number[] }
@@ -757,6 +759,13 @@ const App: React.FC = () => {
 
   // NEW: annotated words persist across sections -> annotatedWords[page] = { [sectionIndex]: number[] }
   const [annotatedWords, setAnnotatedWords] = useState<{ [page: number]: { [section: number]: number[] } }>({});
+
+  // NEW: refs for accessing state in event handlers without re-binding
+  const visitedWordsRef = useRef(visitedWords);
+  const annotatedWordsRef = useRef(annotatedWords);
+
+  useEffect(() => { visitedWordsRef.current = visitedWords; }, [visitedWords]);
+  useEffect(() => { annotatedWordsRef.current = annotatedWords; }, [annotatedWords]);
 
   // stable empty visited object so we don't create a new object every render
   const EMPTY_VISITED = useMemo(() => ({ section: null as number | null, indices: [] as number[] }), []);
@@ -958,12 +967,22 @@ const App: React.FC = () => {
           for (const u of visitUpdates) {
             const wordsOnPage = pageWords[u.page] || [];
             const section = wordsOnPage[u.word]?.sectionIndex ?? null;
-            if (!next[u.page] || next[u.page].section !== section) {
+            const currentEntry = next[u.page];
+            if (!currentEntry) {
               next[u.page] = { section, indices: [u.word] };
-            } else {
-              const s = new Set(next[u.page].indices);
+            } else if (currentEntry.section === section) {
+              const s = new Set(currentEntry.indices);
               s.add(u.word);
               next[u.page] = { section, indices: Array.from(s) };
+            } else if (currentEntry.section === null && section !== null) {
+              // Migration from null section (initial load) to valid section
+              // Keep indices that belong to the new section
+              const validIndices = currentEntry.indices.filter(idx => wordsOnPage[idx]?.sectionIndex === section);
+              const s = new Set(validIndices);
+              s.add(u.word);
+              next[u.page] = { section, indices: Array.from(s) };
+            } else {
+              next[u.page] = { section, indices: [u.word] };
             }
           }
           return next;
@@ -992,6 +1011,7 @@ const App: React.FC = () => {
   // stable double-click handler (same function identity each render)
   const handleWordDoubleClick = useCallback((p: number, idx: number) => {
     const markFnAnnot = isAnnotating;
+    setHighlightMode('word');
     setHighlightedPosition({ page: p, word: idx });
     // batch marking to RAF for speed
     scheduleMark(p, idx, markFnAnnot);
@@ -1062,12 +1082,14 @@ const App: React.FC = () => {
         setSelectionAnchor(null); // Clear anchor after selection
       }
     } else {
-      // Normal click (optional: maybe move highlight position?)
-      // For now, let's just move the highlighter but not mark/annotate unless double clicked
-      // Actually, user might expect click to move the red box.
+      // Normal click
       setHighlightedPosition({ page: p, word: idx });
+      setHighlightMode('word');
+      // Mark the clicked word as visited so it gets the yellow highlight
+      // We use isAnnotating to decide if we should also annotate (green)
+      scheduleMark(p, idx, isAnnotating);
     }
-  }, [selectionAnchor, pageWords, scheduleMark]);
+  }, [selectionAnchor, pageWords, scheduleMark, isAnnotating]);
 
   // Load PDF.js library
   useEffect(() => {
@@ -1184,12 +1206,17 @@ const App: React.FC = () => {
 
       if (event.key === 'ArrowRight') {
         event.preventDefault();
+        setHighlightMode('word');
+
         if (!wordsOnPage.length) {
           // fallback: go to next page start
           if (page + 1 <= pdfDoc.numPages) {
             const nextPage = page + 1;
             const wordsNext = pageWords[nextPage] || [];
             const nextWord = wordsNext.length ? 0 : 0;
+
+            clearPreviousVisited(nextPage, wordsNext.length ? wordsNext[0].sectionIndex : null);
+
             const next = { page: nextPage, word: nextWord };
             // schedule highlight and marking (batched)
             scheduleSetHighlighted(next);
@@ -1202,41 +1229,21 @@ const App: React.FC = () => {
         const currentWord = wordsOnPage[word];
         if (!currentWord) return;
 
-        if (highlightMode === 'phrase') {
-          // Phrase Mode Navigation
-          const currentSentenceIndex = currentWord.sentenceIndex;
-          let nextWordIndex = -1;
+        let nextWordIndex = -1;
 
+        if (highlightMode === 'phrase') {
+          // If we were in phrase mode, ArrowRight should jump to the start of the NEXT phrase (in word mode)
+          const currentSentenceIndex = currentWord.sentenceIndex;
           // Find the first word of the next sentence
-          // We can scan forward from current word
           for (let i = word + 1; i < wordsOnPage.length; i++) {
-            if (wordsOnPage[i].sentenceIndex > currentSentenceIndex) {
+            if (wordsOnPage[i].sentenceIndex !== currentSentenceIndex) {
               nextWordIndex = i;
               break;
             }
           }
-
-          if (nextWordIndex !== -1) {
-            const next = { page, word: nextWordIndex };
-            scheduleSetHighlighted(next);
-
-            // Mark all words in the NEW sentence as visited
-            const newSentenceIndex = wordsOnPage[nextWordIndex].sentenceIndex;
-            for (let i = nextWordIndex; i < wordsOnPage.length; i++) {
-              if (wordsOnPage[i].sentenceIndex === newSentenceIndex) {
-                scheduleMark(page, i, markAnnot);
-              } else {
-                break;
-              }
-            }
-            return;
-          }
-          // If no next sentence on this page, go to next page
-          // ... (fall through to next page logic below)
         } else {
-          // Word Mode Navigation (Existing Logic)
+          // Word Mode Navigation
           const nav = pageNavRef.current[page];
-          let nextWordIndex = -1;
           if (nav) {
             // fast lookup using precomputed nav
             nextWordIndex = nav.nextInSection[word];
@@ -1264,24 +1271,231 @@ const App: React.FC = () => {
               }
             }
           }
+        }
 
-          if (nextWordIndex !== -1) {
-            const next = { page, word: nextWordIndex };
-            scheduleSetHighlighted(next);
-            scheduleMark(next.page, next.word, markAnnot);
-            return;
-          }
+        if (nextWordIndex !== -1) {
+          const next = { page, word: nextWordIndex };
+          scheduleSetHighlighted(next);
+          scheduleMark(next.page, next.word, markAnnot);
+          return;
         }
 
         // otherwise go to next page's first section first word
         for (let p = page + 1; p <= pdfDoc.numPages; p++) {
           const wordsNextPage = pageWords[p] || [];
           if (wordsNextPage.length) {
+            clearPreviousVisited(p, wordsNextPage[0].sectionIndex);
             const next = { page: p, word: 0 };
             scheduleSetHighlighted(next);
+            scheduleMark(next.page, next.word, markAnnot);
+            pageRefs.current[p - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            return;
+          }
+        }
 
-            if (highlightMode === 'phrase') {
-              // Mark entire first sentence of next page
+      } else if (event.key === 'Tab') {
+        event.preventDefault();
+        setHighlightMode('word');
+
+        if (event.shiftKey) {
+          // Shift+Tab: Previous Phrase
+          if (!wordsOnPage.length) {
+            // Fallback to previous page logic similar to ArrowLeft but for phrases
+            if (page > 1) {
+              // ... logic to go to last phrase of prev page
+              // For simplicity, reuse the ArrowLeft fallback logic but adapted for phrase
+              const prevPage = page - 1;
+              const prevWords = pageWords[prevPage] || [];
+              if (prevWords.length) {
+                const lastSentenceIndex = prevWords[prevWords.length - 1].sentenceIndex;
+                let startOfLast = prevWords.length - 1;
+                while (startOfLast > 0 && prevWords[startOfLast - 1].sentenceIndex === lastSentenceIndex) {
+                  startOfLast--;
+                }
+                const next = { page: prevPage, word: startOfLast };
+                scheduleSetHighlighted(next);
+                // Mark it
+                for (let i = startOfLast; i < prevWords.length; i++) {
+                  scheduleMark(prevPage, i, markAnnot);
+                }
+                pageRefs.current[prevPage - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }
+            }
+            return;
+          }
+
+          const currentWord = wordsOnPage[word];
+          if (!currentWord) return;
+
+          // Unhighlight entire current sentence
+          const currentSentenceIndex = currentWord.sentenceIndex;
+          for (let i = word; i >= 0; i--) {
+            if (wordsOnPage[i].sentenceIndex === currentSentenceIndex) {
+              if (isAnnotating) unmarkAnnotated(page, i); else unmarkVisited(page, i);
+            } else {
+              break;
+            }
+          }
+          for (let i = word + 1; i < wordsOnPage.length; i++) {
+            if (wordsOnPage[i].sentenceIndex === currentSentenceIndex) {
+              if (isAnnotating) unmarkAnnotated(page, i); else unmarkVisited(page, i);
+            } else {
+              break;
+            }
+          }
+
+          let prevWordIndex = -1;
+          // Find start of previous sentence
+          for (let i = word - 1; i >= 0; i--) {
+            if (wordsOnPage[i].sentenceIndex < currentSentenceIndex) {
+              const prevSentenceIndex = wordsOnPage[i].sentenceIndex;
+              let startOfPrev = i;
+              while (startOfPrev > 0 && wordsOnPage[startOfPrev - 1].sentenceIndex === prevSentenceIndex) {
+                startOfPrev--;
+              }
+              prevWordIndex = startOfPrev;
+              break;
+            }
+          }
+
+          if (prevWordIndex !== -1) {
+            const next = { page, word: prevWordIndex };
+            scheduleSetHighlighted(next);
+            // Mark new sentence
+            const newSentenceIndex = wordsOnPage[prevWordIndex].sentenceIndex;
+            for (let i = prevWordIndex; i < wordsOnPage.length; i++) {
+              if (wordsOnPage[i].sentenceIndex === newSentenceIndex) {
+                scheduleMark(page, i, markAnnot);
+              } else {
+                break;
+              }
+            }
+            return;
+          }
+
+          // Go to previous page's last sentence
+          for (let p = page - 1; p >= 1; p--) {
+            const wordsPrevPage = pageWords[p] || [];
+            if (wordsPrevPage.length) {
+              const lastSentenceIndex = wordsPrevPage[wordsPrevPage.length - 1].sentenceIndex;
+              let startOfLast = wordsPrevPage.length - 1;
+              while (startOfLast > 0 && wordsPrevPage[startOfLast - 1].sentenceIndex === lastSentenceIndex) {
+                startOfLast--;
+              }
+              const next = { page: p, word: startOfLast };
+              scheduleSetHighlighted(next);
+              for (let i = startOfLast; i < wordsPrevPage.length; i++) {
+                scheduleMark(p, i, markAnnot);
+              }
+              pageRefs.current[p - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              return;
+            }
+          }
+
+        } else {
+          // Tab: Next Phrase
+          if (!wordsOnPage.length) {
+            // Fallback next page
+            if (page + 1 <= pdfDoc.numPages) {
+              const nextPage = page + 1;
+              const wordsNext = pageWords[nextPage] || [];
+              if (wordsNext.length) {
+                clearPreviousVisited(nextPage, wordsNext[0].sectionIndex);
+                const next = { page: nextPage, word: 0 };
+                scheduleSetHighlighted(next);
+                const firstSentenceIndex = wordsNext[0].sentenceIndex;
+                for (let i = 0; i < wordsNext.length; i++) {
+                  if (wordsNext[i].sentenceIndex === firstSentenceIndex) {
+                    scheduleMark(nextPage, i, markAnnot);
+                  } else {
+                    break;
+                  }
+                }
+                pageRefs.current[nextPage - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }
+            }
+            return;
+          }
+
+          const currentWord = wordsOnPage[word];
+          if (!currentWord) return;
+
+          const currentSentenceIndex = currentWord.sentenceIndex;
+
+          // Check if current phrase is partially highlighted
+          const currentSentenceIndices: number[] = [];
+          // Scan backwards
+          for (let i = word; i >= 0; i--) {
+            if (wordsOnPage[i].sentenceIndex === currentSentenceIndex) currentSentenceIndices.push(i);
+            else break;
+          }
+          // Scan forwards
+          for (let i = word + 1; i < wordsOnPage.length; i++) {
+            if (wordsOnPage[i].sentenceIndex === currentSentenceIndex) currentSentenceIndices.push(i);
+            else break;
+          }
+
+          let markedCount = 0;
+          if (markAnnot) {
+            const pageAnnots = annotatedWordsRef.current[page];
+            if (pageAnnots) {
+              for (const idx of currentSentenceIndices) {
+                const sec = wordsOnPage[idx].sectionIndex;
+                if (pageAnnots[sec] && pageAnnots[sec].includes(idx)) markedCount++;
+              }
+            }
+          } else {
+            const pageVisited = visitedWordsRef.current[page];
+            if (pageVisited && pageVisited.indices) {
+              for (const idx of currentSentenceIndices) {
+                // Check if word's section matches visited section
+                if (pageVisited.section === wordsOnPage[idx].sectionIndex && pageVisited.indices.includes(idx)) {
+                  markedCount++;
+                }
+              }
+            }
+          }
+
+          if (markedCount > 0 && markedCount < currentSentenceIndices.length) {
+            // Partially highlighted: highlight the rest
+            for (const idx of currentSentenceIndices) {
+              scheduleMark(page, idx, markAnnot);
+            }
+            return;
+          }
+          let nextWordIndex = -1;
+
+          // Find the first word of the next sentence
+          for (let i = word + 1; i < wordsOnPage.length; i++) {
+            if (wordsOnPage[i].sentenceIndex > currentSentenceIndex) {
+              nextWordIndex = i;
+              break;
+            }
+          }
+
+          if (nextWordIndex !== -1) {
+            const next = { page, word: nextWordIndex };
+            scheduleSetHighlighted(next);
+
+            const newSentenceIndex = wordsOnPage[nextWordIndex].sentenceIndex;
+            for (let i = nextWordIndex; i < wordsOnPage.length; i++) {
+              if (wordsOnPage[i].sentenceIndex === newSentenceIndex) {
+                scheduleMark(page, i, markAnnot);
+              } else {
+                break;
+              }
+            }
+            return;
+          }
+
+          // Go to next page's first sentence
+          for (let p = page + 1; p <= pdfDoc.numPages; p++) {
+            const wordsNextPage = pageWords[p] || [];
+            if (wordsNextPage.length) {
+              clearPreviousVisited(p, wordsNextPage[0].sectionIndex);
+              const next = { page: p, word: 0 };
+              scheduleSetHighlighted(next);
+
               const firstSentenceIndex = wordsNextPage[0].sentenceIndex;
               for (let i = 0; i < wordsNextPage.length; i++) {
                 if (wordsNextPage[i].sentenceIndex === firstSentenceIndex) {
@@ -1290,20 +1504,18 @@ const App: React.FC = () => {
                   break;
                 }
               }
-            } else {
-              scheduleMark(next.page, next.word, markAnnot);
+              pageRefs.current[p - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              return;
             }
-
-            pageRefs.current[p - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            return;
           }
         }
 
       } else if (event.key === 'ArrowLeft') {
         event.preventDefault();
+        setHighlightMode('word');
+
         if (!wordsOnPage.length) {
           if (page > 1) {
-            // unmark current if possible
             if (isAnnotating) unmarkAnnotated(page, word);
             else unmarkVisited(page, word);
 
@@ -1312,7 +1524,6 @@ const App: React.FC = () => {
             const lastIndex = prevWords.length ? prevWords.length - 1 : 0;
             const next = { page: prevPage, word: lastIndex };
             scheduleSetHighlighted(next);
-            // mark the newly highlighted word (batched)
             scheduleMark(next.page, next.word, markAnnot);
             pageRefs.current[prevPage - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
           }
@@ -1323,89 +1534,36 @@ const App: React.FC = () => {
         if (!currentWord) return;
         const nav = pageNavRef.current[page];
 
-        // UNHIGHLIGHT current word before moving left
-        if (highlightMode === 'phrase') {
-          // Unhighlight entire current sentence
-          const currentSentenceIndex = currentWord.sentenceIndex;
-          // We need to find all words of this sentence on this page.
-          // Since we might be in the middle of a sentence (if user switched modes), 
-          // we should scan both directions or just scan the whole page for this sentence index.
-          // Optimization: scan around 'word'.
-
-          // Scan backwards
-          for (let i = word; i >= 0; i--) {
-            if (wordsOnPage[i].sentenceIndex === currentSentenceIndex) {
-              if (isAnnotating) unmarkAnnotated(page, i); else unmarkVisited(page, i);
-            } else {
-              break;
-            }
-          }
-          // Scan forwards
-          for (let i = word + 1; i < wordsOnPage.length; i++) {
-            if (wordsOnPage[i].sentenceIndex === currentSentenceIndex) {
-              if (isAnnotating) unmarkAnnotated(page, i); else unmarkVisited(page, i);
-            } else {
-              break;
-            }
-          }
-
-        } else {
-          if (isAnnotating) unmarkAnnotated(page, word); else unmarkVisited(page, word);
-        }
+        // Unmark current word
+        if (isAnnotating) unmarkAnnotated(page, word); else unmarkVisited(page, word);
 
         let prevWordIndex = -1;
-
-        if (highlightMode === 'phrase') {
-          const currentSentenceIndex = currentWord.sentenceIndex;
-          // Find start of previous sentence
-          // Scan backwards from current word to find a word with sentenceIndex < currentSentenceIndex
-          for (let i = word - 1; i >= 0; i--) {
-            if (wordsOnPage[i].sentenceIndex < currentSentenceIndex) {
-              // We found a word in a previous sentence. 
-              // Now we need to find the *start* of that sentence.
-              const prevSentenceIndex = wordsOnPage[i].sentenceIndex;
-              // Scan backwards to find the first word of this prev sentence
-              let startOfPrev = i;
-              while (startOfPrev > 0 && wordsOnPage[startOfPrev - 1].sentenceIndex === prevSentenceIndex) {
-                startOfPrev--;
-              }
-              prevWordIndex = startOfPrev;
-              break;
+        // Word Mode Navigation
+        if (nav) {
+          prevWordIndex = nav.prevInSection[word];
+          if (prevWordIndex === -1) {
+            const currentSection = currentWord.sectionIndex;
+            const prevSections = Array.from(new Set(wordsOnPage.map(w => w.sectionIndex))).filter((idx): idx is number => typeof idx === 'number' && idx < currentSection).sort((a, b) => b - a);
+            if (prevSections.length) {
+              prevWordIndex = wordsOnPage.findIndex(w => w.sectionIndex === prevSections[0]);
             }
           }
         } else {
-          // Word Mode (Existing Logic)
-          if (nav) {
-            prevWordIndex = nav.prevInSection[word];
-            if (prevWordIndex === -1) {
-              // find previous section start (first of previous section)
-              // fallback to scanning for previous section
-              const currentSection = currentWord.sectionIndex;
-              const prevSections = Array.from(new Set(wordsOnPage.map(w => w.sectionIndex))).filter((idx): idx is number => typeof idx === 'number' && idx < currentSection).sort((a, b) => b - a);
-              if (prevSections.length) {
-                prevWordIndex = wordsOnPage.findIndex(w => w.sectionIndex === prevSections[0]);
-              }
+          const currentSection = currentWord.sectionIndex;
+          for (let i = word - 1; i >= 0; i--) {
+            if (wordsOnPage[i].sectionIndex === currentSection) {
+              prevWordIndex = i;
+              break;
             }
-          } else {
-            // slow fallback
-            const currentSection = currentWord.sectionIndex;
-            for (let i = word - 1; i >= 0; i--) {
-              if (wordsOnPage[i].sectionIndex === currentSection) {
-                prevWordIndex = i;
-                break;
-              }
-            }
-
-            if (prevWordIndex === -1) {
-              const prevSectionIndex = wordsOnPage
-                .map(w => w.sectionIndex)
-                .filter(idx => idx < currentSection)
-                .sort((a, b) => b - a)[0];
-
-              if (prevSectionIndex !== undefined) {
-                const firstOfPrev = wordsOnPage.findIndex(w => w.sectionIndex === prevSectionIndex);
-                if (firstOfPrev !== -1) prevWordIndex = firstOfPrev;
-              }
+          }
+          if (prevWordIndex === -1) {
+            const prevSectionIndex = wordsOnPage
+              .map(w => w.sectionIndex)
+              .filter(idx => idx < currentSection)
+              .sort((a, b) => b - a)[0];
+            if (prevSectionIndex !== undefined) {
+              const firstOfPrev = wordsOnPage.findIndex(w => w.sectionIndex === prevSectionIndex);
+              if (firstOfPrev !== -1) prevWordIndex = firstOfPrev;
             }
           }
         }
@@ -1413,49 +1571,16 @@ const App: React.FC = () => {
         if (prevWordIndex !== -1) {
           const next = { page, word: prevWordIndex };
           scheduleSetHighlighted(next);
-
-          if (highlightMode === 'phrase') {
-            // Mark the new current sentence (we are moving back to it, so we should probably mark it visited again? 
-            // Actually, usually moving left unmarks the *current* thing, but doesn't necessarily mark the *previous* thing if it was already visited.
-            // But in this app, the "cursor" is always yellow. So yes, we must mark the sentence we landed on.
-            const newSentenceIndex = wordsOnPage[prevWordIndex].sentenceIndex;
-            for (let i = prevWordIndex; i < wordsOnPage.length; i++) {
-              if (wordsOnPage[i].sentenceIndex === newSentenceIndex) {
-                scheduleMark(page, i, markAnnot);
-              } else {
-                break;
-              }
-            }
-          } else {
-            scheduleMark(next.page, next.word, markAnnot);
-          }
-
+          scheduleMark(next.page, next.word, markAnnot);
           return;
         }
 
-        // otherwise go to previous page's last section last word (or last sentence start)
+        // otherwise go to previous page's last section last word
         for (let p = page - 1; p >= 1; p--) {
           const wordsPrevPage = pageWords[p] || [];
           if (wordsPrevPage.length) {
-            let nextWord = 0;
-            if (highlightMode === 'phrase') {
-              // Find start of last sentence on previous page
-              const lastSentenceIndex = wordsPrevPage[wordsPrevPage.length - 1].sentenceIndex;
-              let startOfLast = wordsPrevPage.length - 1;
-              while (startOfLast > 0 && wordsPrevPage[startOfLast - 1].sentenceIndex === lastSentenceIndex) {
-                startOfLast--;
-              }
-              nextWord = startOfLast;
-
-              // Mark it
-              for (let i = startOfLast; i < wordsPrevPage.length; i++) {
-                scheduleMark(p, i, markAnnot);
-              }
-            } else {
-              nextWord = wordsPrevPage.length - 1;
-              scheduleMark(p, nextWord, markAnnot);
-            }
-
+            const nextWord = wordsPrevPage.length - 1;
+            scheduleMark(p, nextWord, markAnnot);
             const next = { page: p, word: nextWord };
             scheduleSetHighlighted(next);
             pageRefs.current[p - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1529,9 +1654,6 @@ const App: React.FC = () => {
 
         const currentSection = currentWord.sectionIndex;
 
-        // NEW: clear all highlights for the whole section when jumping to its first word.
-        // If we're in annotate mode, remove the persistent annotations for that section.
-        // Otherwise, clear the visited (accumulative) highlights for that section.
         if (currentSection !== null) {
           if (isAnnotating) {
             setAnnotatedWords(prev => {
@@ -1574,7 +1696,7 @@ const App: React.FC = () => {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [pdfDoc, highlightedPosition, pageWordCounts, pageWords, markVisited, markAnnotated, unmarkVisited, unmarkAnnotated, isAnnotating, scheduleSetHighlighted, scheduleMark, highlightMode]);
+  }, [pdfDoc, highlightedPosition, pageWordCounts, pageWords, markVisited, markAnnotated, unmarkVisited, unmarkAnnotated, isAnnotating, scheduleSetHighlighted, scheduleMark]);
 
   const processFile = async (file: File) => {
     if (!pdfjsLib) {
@@ -1590,6 +1712,7 @@ const App: React.FC = () => {
     setIsLoading(true);
     setError(null);
     setPdfDoc(null);
+    setPdfBytes(null);
     setHighlightedPosition(null);
     setPageWordCounts({});
     setPageWords({});
@@ -1598,7 +1721,11 @@ const App: React.FC = () => {
       const reader = new FileReader();
       reader.onload = async (e) => {
         try {
-          const typedArray = new Uint8Array(e.target?.result as ArrayBuffer);
+          const buffer = e.target?.result as ArrayBuffer;
+          const typedArray = new Uint8Array(buffer);
+          // Create a copy for pdf-lib because pdf.js might transfer the buffer to a worker
+          setPdfBytes(new Uint8Array(typedArray));
+
           const loadingTask = pdfjsLib.getDocument(typedArray);
           const doc = await loadingTask.promise;
           setPdfDoc(doc);
@@ -1644,6 +1771,69 @@ const App: React.FC = () => {
   const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
+  };
+
+  const savePdfWithHighlights = async () => {
+    if (!pdfBytes || !pdfDoc) return;
+
+    try {
+      const pdfDocLib = await PDFDocument.load(pdfBytes);
+      const pages = pdfDocLib.getPages();
+
+      // Iterate over all pages with annotations
+      for (const [pageNumStr, indices] of Object.entries(annotatedIndicesMap as Record<string, number[]>)) {
+        const pageNum = parseInt(pageNumStr, 10); // 1-based
+        if (isNaN(pageNum) || pageNum < 1 || pageNum > pages.length) continue;
+
+        const page = pages[pageNum - 1]; // 0-based
+        const wordsOnPage = pageWords[pageNum] || [];
+
+        // Group adjacent words to form rectangles (optimization)
+        // For now, drawing individual rectangles for each word is simpler and safer for layout
+
+        for (const idx of indices) {
+          const word = wordsOnPage[idx];
+          if (!word) continue;
+
+          // Word transform: [scaleX, skewY, skewX, scaleY, x, y]
+          // x, y are in PDF user space (bottom-left origin usually)
+          const x = word.transform[4];
+          const y = word.transform[5];
+          const width = word.width; // In PDF units
+          const height = word.height; // In PDF units
+
+          // Calculate rectangle coordinates
+          // Based on visual rendering: top = y - height * 0.85 (viewport, y down)
+          // In PDF (y up): top = y + height * 0.85
+          // Bottom = y - height * 0.35
+          // Height = height * 1.2
+
+          page.drawRectangle({
+            x: x,
+            y: y - (height * 0.35),
+            width: width,
+            height: height * 1.2,
+            color: rgb(0.56, 0.93, 0.56), // Light green
+            opacity: 0.45,
+          });
+        }
+      }
+
+      const modifiedPdfBytes = await pdfDocLib.save();
+      const blob = new Blob([modifiedPdfBytes as any], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'highlighted_document.pdf';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+    } catch (err) {
+      console.error('Failed to save PDF', err);
+      alert('Failed to save PDF with highlights.');
+    }
   };
 
   const triggerFileSelect = () => fileInputRef.current?.click();
@@ -1695,7 +1885,18 @@ const App: React.FC = () => {
 
     if (pdfDoc) {
       return (
-        <div className="p-4 md:p-8 space-y-8">
+        <div className="p-4 md:p-8 space-y-8 relative">
+          <div className="fixed bottom-8 right-8 z-50 flex flex-col gap-4">
+            <button
+              onClick={savePdfWithHighlights}
+              className="bg-green-600 text-white p-4 rounded-full shadow-lg hover:bg-green-700 transition-colors flex items-center justify-center"
+              title="Save PDF with Highlights"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+              </svg>
+            </button>
+          </div>
           {Array.from({ length: pdfDoc.numPages }, (_, i) => {
             const annotatedIndices = annotatedIndicesMap[i + 1] || [];
 
@@ -1744,24 +1945,7 @@ const App: React.FC = () => {
             </button>
           </div>
 
-          {/* Highlight Mode Toggle */}
-          <div className="mt-4 flex items-center justify-center space-x-4">
-            <span className="text-sm text-gray-600">Highlight Mode:</span>
-            <div className="flex bg-gray-100 rounded-lg p-1">
-              <button
-                onClick={() => setHighlightMode('word')}
-                className={`px-3 py-1 text-sm rounded-md transition-colors ${highlightMode === 'word' ? 'bg-white shadow text-blue-600 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
-              >
-                Word
-              </button>
-              <button
-                onClick={() => setHighlightMode('phrase')}
-                className={`px-3 py-1 text-sm rounded-md transition-colors ${highlightMode === 'phrase' ? 'bg-white shadow text-blue-600 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
-              >
-                Phrase
-              </button>
-            </div>
-          </div>
+          {/* Highlight Mode Toggle Removed */}\n
 
           <p className="mt-3 text-sm text-gray-500">You can also press and hold "S" while double-clicking words to toggle annotation mode.</p>
           <input

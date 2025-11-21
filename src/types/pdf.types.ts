@@ -1,3 +1,5 @@
+import React from 'react';
+
 export interface WordItem {
     str: string;
     transform: number[];
@@ -5,6 +7,7 @@ export interface WordItem {
     height: number;
     sectionIndex: number;
     sentenceIndex: number;
+    isPageNumber?: boolean;
 }
 
 export interface HighlightedPosition {

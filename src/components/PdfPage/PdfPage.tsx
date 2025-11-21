@@ -136,10 +136,46 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
           lastLineHeight = currentHeight;
         }
 
+        // Post-process to identify page numbers
+        const wordsBySection: { [key: number]: any[] } = {};
+        parsedWords.forEach(w => {
+          if (!wordsBySection[w.sectionIndex]) wordsBySection[w.sectionIndex] = [];
+          wordsBySection[w.sectionIndex].push(w);
+        });
+
+        Object.values(wordsBySection).forEach(sectionWords => {
+          // Check 1: Isolation (3 words or fewer)
+          if (sectionWords.length > 3) return;
+
+          // Check 2: Content (Numeric or Roman)
+          const text = sectionWords.map(w => w.str).join('').trim();
+          const isNumeric = /^\d+$/.test(text);
+          // Simple roman check (case insensitive)
+          const isRoman = /^[ivxlcdm]+$/i.test(text);
+
+          if (!isNumeric && !isRoman) return;
+
+          // Check 3: Position (Header or Footer 15%)
+          // Use the first word's transform to determine position
+          const w = sectionWords[0];
+          const tx = pdfjsLib.Util.transform(pageViewport.transform, w.transform);
+          const y = tx[5]; // y coordinate in viewport
+
+          const isHeader = y < pageViewport.height * 0.15;
+          const isFooter = y > pageViewport.height * 0.85;
+
+          if (isHeader || isFooter) {
+            sectionWords.forEach(w => w.isPageNumber = true);
+          }
+        });
+
+        // Filter out page numbers completely so they are ignored by navigation and rendering
+        const filteredWords = parsedWords.filter(w => !w.isPageNumber);
+
         if (!isCancelled) {
-          setWords(parsedWords);
-          // send full parsed words to parent so it can manage sections/navigation
-          onWordsParsed(pageNumber, parsedWords);
+          setWords(filteredWords);
+          // send filtered words to parent so it can manage sections/navigation
+          onWordsParsed(pageNumber, filteredWords);
           setStatus('rendered');
         }
       } catch (error) {
@@ -397,9 +433,13 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
         const annotatedSet = new Set(annotatedIndices || []);
 
         for (const idx of visitedWordInfo.indices) {
-          if (readingHighlightStyle !== 'underline' && annotatedSet.has(idx)) continue; // skip annotated words unless underlining
+          if (annotatedSet.has(idx)) continue; // skip annotated words
           const w = words[idx];
           if (!w) continue;
+
+          // Skip page numbers for all styles (redundant if filtered, but safe to keep or remove)
+          // if (w.isPageNumber) continue;
+
           if (visitedWordInfo.section !== null && w.sectionIndex !== visitedWordInfo.section) continue;
 
           const tx = pdfjsLib.Util.transform(viewport.transform, w.transform);
@@ -470,6 +510,8 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
       if (highlightedWordIndex !== null && words[highlightedWordIndex]) {
         const wordItem = words[highlightedWordIndex];
 
+        // Skip highlighting current word if it is a page number (redundant if filtered)
+        // if (!wordItem.isPageNumber) {
         // Parse color for current selection
         const hex = readingHighlightColor.replace('#', '');
         const rVal = parseInt(hex.substring(0, 2), 16);

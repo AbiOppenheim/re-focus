@@ -44,7 +44,7 @@ export const PdfPage = React.forwardRef<HTMLDivElement, PdfPageProps>(
 
           canvas.height = pageViewport.height;
           canvas.width = pageViewport.width;
-          
+
           await page.render({ canvasContext: context, viewport: pageViewport }).promise;
 
           const textContent = await page.getTextContent();
@@ -72,14 +72,14 @@ export const PdfPage = React.forwardRef<HTMLDivElement, PdfPageProps>(
               currentXOffset += partWidth;
             }
           }
-          
+
           if (!isCancelled) {
             setWords(parsedWords);
             onWordsParsed(pageNumber, parsedWords.length);
             setStatus('rendered');
           }
         } catch (error) {
-          console.error(`Failed to render page ${pageNumber}`, error);
+
           if (!isCancelled) setStatus('error');
         }
       };
@@ -94,50 +94,50 @@ export const PdfPage = React.forwardRef<HTMLDivElement, PdfPageProps>(
     }, [pdfDoc, pageNumber, onWordsParsed]);
 
     useEffect(() => {
-        if (!highlightCanvasRef.current || !viewport || words.length === 0) return;
-    
-        const canvas = highlightCanvasRef.current;
-        const context = canvas.getContext('2d');
-        if (!context) return;
-        
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        
-        context.clearRect(0, 0, canvas.width, canvas.height);
-    
-        if (highlightedWordIndex !== null && words[highlightedWordIndex]) {
-            const wordItem = words[highlightedWordIndex];
-            
-            context.fillStyle = 'rgba(255, 255, 0, 0.4)';
-            context.globalCompositeOperation = 'multiply';
+      if (!highlightCanvasRef.current || !viewport || words.length === 0) return;
 
-            const tx = pdfjsLib.Util.transform(viewport.transform, wordItem.transform);
-            const x = tx[4];
-            const y = tx[5];
-            
-            const width = wordItem.width * scale;
-            const height = wordItem.height * scale * 1.2;
-            
-            context.fillRect(x, y - height * 0.85, width, height);
-        }
+      const canvas = highlightCanvasRef.current;
+      const context = canvas.getContext('2d');
+      if (!context) return;
+
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      context.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (highlightedWordIndex !== null && words[highlightedWordIndex]) {
+        const wordItem = words[highlightedWordIndex];
+
+        context.fillStyle = 'rgba(255, 255, 0, 0.4)';
+        context.globalCompositeOperation = 'multiply';
+
+        const tx = pdfjsLib.Util.transform(viewport.transform, wordItem.transform);
+        const x = tx[4];
+        const y = tx[5];
+
+        const width = wordItem.width * scale;
+        const height = wordItem.height * scale * 1.2;
+
+        context.fillRect(x, y - height * 0.85, width, height);
+      }
 
     }, [words, viewport, highlightedWordIndex]);
 
     return (
       <div ref={ref} className="bg-white p-4 rounded-lg shadow-lg flex flex-col items-center">
         <div className="relative w-full">
-            {status === 'loading' && (
-                <div className="absolute inset-0 bg-gray-200 bg-opacity-75 flex items-center justify-center z-10 rounded-md">
-                <p className="text-gray-600">Loading page {pageNumber}...</p>
-                </div>
-            )}
-            {status === 'error' && (
-                <div className="absolute inset-0 bg-red-100 flex items-center justify-center z-10 rounded-md">
-                <p className="text-red-600">Could not load page {pageNumber}</p>
-                </div>
-            )}
-            <canvas ref={pdfCanvasRef} className="w-full h-auto" />
-            <canvas ref={highlightCanvasRef} className="absolute top-0 left-0 w-full h-full pointer-events-none" />
+          {status === 'loading' && (
+            <div className="absolute inset-0 bg-gray-200 bg-opacity-75 flex items-center justify-center z-10 rounded-md">
+              <p className="text-gray-600">Loading page {pageNumber}...</p>
+            </div>
+          )}
+          {status === 'error' && (
+            <div className="absolute inset-0 bg-red-100 flex items-center justify-center z-10 rounded-md">
+              <p className="text-red-600">Could not load page {pageNumber}</p>
+            </div>
+          )}
+          <canvas ref={pdfCanvasRef} className="w-full h-auto" />
+          <canvas ref={highlightCanvasRef} className="absolute top-0 left-0 w-full h-full pointer-events-none" />
         </div>
         <div className="text-center text-sm text-gray-500 pt-2">Page {pageNumber}</div>
       </div>

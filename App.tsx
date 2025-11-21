@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { PDFDocument, rgb } from 'pdf-lib';
+import { PDFDocument, rgb, PDFName, PDFString, PDFArray, PDFDict } from 'pdf-lib';
 
 interface WordItem {
   str: string;
@@ -23,7 +23,13 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
   selectionAnchor?: { page: number; word: number } | null; // NEW
   scrollState: React.MutableRefObject<{ ratio: number; isAutoScrolling: boolean }>;
   highlightMode: 'word' | 'phrase'; // NEW
-}>(({ pdfDoc, pageNumber, highlightedWordIndex, visitedWordInfo = { section: null, indices: [] }, annotatedIndices = [], onWordsParsed, pdfjsLib, onWordDoubleClick, onWordClick, selectionAnchor, scrollState, highlightMode }, ref) => {
+  isHighlightToolActive: boolean; // NEW
+  dragSelection: { start: { page: number; word: number }; end: { page: number; word: number } } | null; // NEW
+  onWordMouseDown: (pageNumber: number, wordIndex: number) => void; // NEW
+  onWordMouseEnter: (pageNumber: number, wordIndex: number) => void; // NEW
+  readingHighlightColor: string; // NEW
+  readingHighlightStyle: 'highlight' | 'underline'; // NEW
+}>(({ pdfDoc, pageNumber, highlightedWordIndex, visitedWordInfo = { section: null, indices: [] }, annotatedIndices = [], onWordsParsed, pdfjsLib, onWordDoubleClick, onWordClick, selectionAnchor, scrollState, highlightMode, isHighlightToolActive, dragSelection, onWordMouseDown, onWordMouseEnter, readingHighlightColor, readingHighlightStyle }, ref) => {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const highlightCanvasRef = useRef<HTMLCanvasElement>(null);
   const annotationLayerRef = useRef<HTMLDivElement>(null);
@@ -78,7 +84,7 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
           }
         } catch (ae) {
           // non-fatal
-          console.warn('Failed to get annotations for page', pageNumber, ae);
+
         }
 
         const parsedWords: any[] = [];
@@ -145,7 +151,7 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
           setStatus('rendered');
         }
       } catch (error) {
-        console.error(`Failed to render page ${pageNumber}`, error);
+
         if (!isCancelled) setStatus('error');
       }
     };
@@ -193,7 +199,7 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
               resolvedInternal = { pageNumber: pageIndex + 1, destArray: dest };
             }
           } catch (err) {
-            console.warn('Failed to resolve internal destination', err);
+
           }
         }
 
@@ -238,7 +244,7 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
                   window.location.hash = `page-${resolvedInternal!.pageNumber}`;
                 }
               } catch (err) {
-                console.warn('Internal link navigation failed', err);
+
               }
             });
           }
@@ -298,13 +304,13 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
                 onWordDoubleClick(pageNumber, found);
               }
             } catch (err) {
-              console.warn('dblclick forward failed', err);
+
             }
           });
 
           layer.appendChild(el);
         } catch (err) {
-          console.warn('Failed to create annotation element', err);
+
         }
       }
     })();
@@ -312,7 +318,7 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
 
   // Draw highlights (simplified: remove per-section colored backgrounds)
   useEffect(() => {
-    console.time && console.time(`page-${pageNumber}-highlight-effect`);
+
     try {
       if (!highlightCanvasRef.current || !viewport || words.length === 0 || !pdfjsLib) return;
       const t0 = performance.now();
@@ -326,7 +332,7 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
       // Draw annotated green fill (persistent across sections)
       if (annotatedIndices && annotatedIndices.length) {
         context.globalCompositeOperation = 'source-over';
-        context.fillStyle = 'rgba(144, 238, 144, 0.45)'; // light green
+        context.fillStyle = 'rgba(144, 238, 144, 0.45)'; // light green (hardcoded)
 
         const rawRects: { x: number; y: number; width: number; height: number; lineY: number }[] = [];
         for (const idx of annotatedIndices) {
@@ -347,7 +353,11 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
           rawRects.sort((a, b) => (a.lineY - b.lineY) || (a.x - b.x));
           const merged: typeof rawRects = [];
           const lineTolerance = Math.max(2, 2 * scale);
-          const gapTolerance = Math.max(2, 6 * scale);
+
+          // Calculate adaptive gap tolerance based on average word width
+          // This helps handle titles/headings with wider spacing
+          const avgWidth = rawRects.reduce((sum, r) => sum + r.width, 0) / rawRects.length;
+          const gapTolerance = Math.max(12 * scale, avgWidth * 0.8);
 
           let current = rawRects[0];
           for (let i = 1; i < rawRects.length; i++) {
@@ -383,14 +393,19 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
       // Draw accumulative yellow fill for visited words of the current section only (skip annotated words)
       if (visitedWordInfo && visitedWordInfo.indices && visitedWordInfo.indices.length) {
         context.globalCompositeOperation = 'source-over';
-        context.fillStyle = 'rgba(255, 223, 0, 0.45)'; // warm yellow
+        // Convert hex to rgba with opacity
+        const hex = readingHighlightColor.replace('#', '');
+        const r = parseInt(hex.substring(0, 2), 16);
+        const g = parseInt(hex.substring(2, 4), 16);
+        const b = parseInt(hex.substring(4, 6), 16);
+        context.fillStyle = `rgba(${r}, ${g}, ${b}, 1.0)`;
 
         const rawRects: { x: number; y: number; width: number; height: number; lineY: number }[] = [];
         // build a Set of annotated indices so we don't draw yellow over green
         const annotatedSet = new Set(annotatedIndices || []);
 
         for (const idx of visitedWordInfo.indices) {
-          if (annotatedSet.has(idx)) continue; // skip annotated words
+          if (readingHighlightStyle !== 'underline' && annotatedSet.has(idx)) continue; // skip annotated words unless underlining
           const w = words[idx];
           if (!w) continue;
           if (visitedWordInfo.section !== null && w.sectionIndex !== visitedWordInfo.section) continue;
@@ -409,7 +424,11 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
           rawRects.sort((a, b) => (a.lineY - b.lineY) || (a.x - b.x));
           const merged: typeof rawRects = [];
           const lineTolerance = Math.max(2, 2 * scale);
-          const gapTolerance = Math.max(2, 6 * scale);
+
+          // Calculate adaptive gap tolerance based on average word width
+          // This helps handle titles/headings with wider spacing
+          const avgWidth = rawRects.reduce((sum, r) => sum + r.width, 0) / rawRects.length;
+          const gapTolerance = Math.max(12 * scale, avgWidth * 0.8);
 
           let current = rawRects[0];
           for (let i = 1; i < rawRects.length; i++) {
@@ -437,7 +456,20 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
           merged.push(current);
 
           merged.forEach(r => {
-            context.fillRect(r.x, r.y, r.width, r.height);
+            if (readingHighlightStyle === 'underline') {
+              // Convert hex to rgba with opacity 1.0 for underline
+              const hex = readingHighlightColor.replace('#', '');
+              const rVal = parseInt(hex.substring(0, 2), 16);
+              const gVal = parseInt(hex.substring(2, 4), 16);
+              const bVal = parseInt(hex.substring(4, 6), 16);
+              context.fillStyle = `rgba(${rVal}, ${gVal}, ${bVal}, 1.0)`;
+
+              // Draw underline at the bottom
+              const underlineHeight = Math.max(2, r.height * 0.1); // 10% of height or at least 2px
+              context.fillRect(r.x, r.y + r.height - underlineHeight, r.width, underlineHeight);
+            } else {
+              context.fillRect(r.x, r.y, r.width, r.height);
+            }
           });
         }
       }
@@ -446,9 +478,34 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
       if (highlightedWordIndex !== null && words[highlightedWordIndex]) {
         const wordItem = words[highlightedWordIndex];
 
-        context.strokeStyle = 'rgba(255, 0, 0, 0.9)';
-        context.lineWidth = 2;
+        // Parse color for current selection
+        const hex = readingHighlightColor.replace('#', '');
+        const rVal = parseInt(hex.substring(0, 2), 16);
+        const gVal = parseInt(hex.substring(2, 4), 16);
+        const bVal = parseInt(hex.substring(4, 6), 16);
+
         context.globalCompositeOperation = 'source-over';
+
+        // Determine style
+        if (readingHighlightStyle === 'underline') {
+          context.fillStyle = `rgba(${rVal}, ${gVal}, ${bVal}, 1.0)`; // Solid color for active underline
+        } else {
+          // Darker highlight: darken RGB by 30% and use higher opacity
+          const rDark = Math.max(0, Math.floor(rVal * 0.7));
+          const gDark = Math.max(0, Math.floor(gVal * 0.7));
+          const bDark = Math.max(0, Math.floor(bVal * 0.7));
+          context.fillStyle = `rgba(${rDark}, ${gDark}, ${bDark}, 1.0)`;
+        }
+
+        const drawRect = (r: { x: number, y: number, width: number, height: number }) => {
+          if (readingHighlightStyle === 'underline') {
+            // Bolder underline
+            const underlineHeight = Math.max(4, r.height * 0.15); // Thicker than visited
+            context.fillRect(r.x, r.y + r.height - underlineHeight, r.width, underlineHeight);
+          } else {
+            context.fillRect(r.x, r.y, r.width, r.height);
+          }
+        };
 
         if (highlightMode === 'phrase') {
           // Highlight entire sentence
@@ -498,7 +555,7 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
             merged.push(current);
 
             merged.forEach(r => {
-              context.strokeRect(r.x, r.y, r.width, r.height);
+              drawRect(r);
             });
           }
 
@@ -511,7 +568,7 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
           const width = wordItem.width * scale;
           const height = wordItem.height * scale * 1.2;
 
-          context.strokeRect(x, y - height * 0.85, width, height);
+          drawRect({ x, y: y - height * 0.85, width, height });
         }
       }
       // Draw selection anchor (start point of range selection)
@@ -533,15 +590,121 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
       }
 
       const t1 = performance.now();
-      console.log(`page ${pageNumber} highlight draw: ${Math.round(t1 - t0)}ms`);
+      // Draw drag selection (temporary visual feedback)
+      if (dragSelection && words.length > 0) {
+        const { start, end } = dragSelection;
+        // Determine if this page is within the selection range
+        const startPage = Math.min(start.page, end.page);
+        const endPage = Math.max(start.page, end.page);
+
+        if (pageNumber >= startPage && pageNumber <= endPage) {
+          context.globalCompositeOperation = 'source-over';
+          context.fillStyle = 'rgba(0, 100, 255, 0.2)'; // Light blue for selection
+
+          let startIndex = 0;
+          let endIndex = words.length - 1;
+
+          if (pageNumber === startPage) {
+            // If start and end are on the same page
+            if (startPage === endPage) {
+              // Determine min and max word index to handle reverse drag
+              const sWord = start.page === end.page ? start.word : (start.page < end.page ? start.word : end.word);
+              const eWord = start.page === end.page ? end.word : (start.page < end.page ? end.word : start.word);
+
+              // Actually, let's simplify. The app logic should normalize start/end or we do it here.
+              // Let's assume start/end are just points and we need to find the range.
+              // But wait, start is where mouse went down, end is current mouse pos.
+              // So they can be inverted.
+
+              const p1 = start;
+              const p2 = end;
+
+              // We are on the single page.
+              startIndex = Math.min(p1.word, p2.word);
+              endIndex = Math.max(p1.word, p2.word);
+            } else {
+              // Multi-page, this is start page.
+              // If start.page is this page, start from start.word.
+              // If end.page is this page (reverse drag), start from end.word.
+              startIndex = (start.page === pageNumber) ? start.word : end.word;
+              // endIndex is end of page
+            }
+          }
+
+          if (pageNumber === endPage && startPage !== endPage) {
+            // Multi-page, this is end page.
+            startIndex = 0;
+            endIndex = (end.page === pageNumber) ? end.word : start.word;
+          }
+
+          if (pageNumber > startPage && pageNumber < endPage) {
+            // Middle page, select all
+            startIndex = 0;
+            endIndex = words.length - 1;
+          }
+
+          // Draw rects
+          const rawRects: { x: number; y: number; width: number; height: number; lineY: number }[] = [];
+          for (let i = startIndex; i <= endIndex; i++) {
+            const w = words[i];
+            if (!w) continue;
+            const tx = pdfjsLib.Util.transform(viewport.transform, w.transform);
+            const x = tx[4];
+            const y = tx[5];
+            const width = w.width * scale;
+            const height = w.height * scale * 1.2;
+            const top = y - height * 0.85;
+            rawRects.push({ x, y: top, width, height, lineY: Math.round(y) });
+          }
+
+          if (rawRects.length) {
+            // Merge logic (reused)
+            rawRects.sort((a, b) => (a.lineY - b.lineY) || (a.x - b.x));
+            const merged: typeof rawRects = [];
+            const lineTolerance = Math.max(2, 2 * scale);
+            const gapTolerance = Math.max(2, 6 * scale);
+
+            let current = rawRects[0];
+            for (let i = 1; i < rawRects.length; i++) {
+              const next = rawRects[i];
+              if (Math.abs(next.lineY - current.lineY) <= lineTolerance) {
+                const currentRight = current.x + current.width;
+                const nextRight = next.x + next.width;
+                if (next.x <= currentRight + gapTolerance) {
+                  const newRight = Math.max(currentRight, nextRight);
+                  const newTop = Math.min(current.y, next.y);
+                  const newBottom = Math.max(current.y + current.height, next.y + next.height);
+                  current = {
+                    x: Math.min(current.x, next.x),
+                    y: newTop,
+                    width: newRight - Math.min(current.x, next.x),
+                    height: newBottom - newTop,
+                    lineY: Math.round((current.lineY + next.lineY) / 2),
+                  };
+                  continue;
+                }
+              }
+              merged.push(current);
+              current = next;
+            }
+            merged.push(current);
+
+            merged.forEach(r => {
+              context.fillRect(r.x, r.y, r.width, r.height);
+            });
+          }
+        }
+      }
+
+
     } finally {
-      console.timeEnd && console.timeEnd(`page-${pageNumber}-highlight-effect`);
+
     }
-  }, [words, viewport, highlightedWordIndex, pdfjsLib, visitedWordInfo, annotatedIndices, selectionAnchor, highlightMode]);
+  }, [words, viewport, highlightedWordIndex, pdfjsLib, visitedWordInfo, annotatedIndices, selectionAnchor, highlightMode, dragSelection, readingHighlightColor, readingHighlightStyle]);
 
   // NEW: create transparent hit targets for each parsed word so double-click can be detected
   useEffect(() => {
-    console.time && console.time(`page-${pageNumber}-wordlayer-effect`);
+
     try {
       const layer = wordLayerRef.current;
       const canvas = pdfCanvasRef.current;
@@ -590,26 +753,41 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
               onWordClick(pageNumber, idx, e.shiftKey);
             }
           };
+          const mousedown = (e: MouseEvent) => {
+            if (isHighlightToolActive) {
+              e.stopPropagation();
+              e.preventDefault(); // Prevent text selection
+              onWordMouseDown(pageNumber, idx);
+            }
+          };
+          const mouseenter = (e: MouseEvent) => {
+            if (isHighlightToolActive) {
+              // We don't stop propagation here necessarily, but we could
+              onWordMouseEnter(pageNumber, idx);
+            }
+          };
+
           el.addEventListener('dblclick', dbl);
           el.addEventListener('click', click);
+          el.addEventListener('mousedown', mousedown);
+          el.addEventListener('mouseenter', mouseenter);
+
           handles.push({ el, handler: dbl }); // keeping track mainly for cleanup if we needed it
 
           layer.appendChild(el);
         } catch (err) {
           // ignore word overlay failures for safety
-          console.warn('word overlay failed', err);
+
         }
       });
-      const t1 = performance.now();
-      console.log(`page ${pageNumber} wordLayer build: ${Math.round(t1 - t0)}ms`);
     } finally {
-      console.timeEnd && console.timeEnd(`page-${pageNumber}-wordlayer-effect`);
+
     }
-  }, [words, viewport, pdfjsLib, pageNumber, scale, onWordDoubleClick, onWordClick]);
+  }, [words, viewport, pdfjsLib, pageNumber, scale, onWordDoubleClick, onWordClick, isHighlightToolActive, onWordMouseDown, onWordMouseEnter]);
 
   // NEW: Scroll the window so the currently highlighted word is visible and centered based on user preference
   useEffect(() => {
-    console.time && console.time(`page-${pageNumber}-scroll-effect`);
+
     try {
       if (highlightedWordIndex === null) return;
       if (!viewport || !pdfjsLib) return;
@@ -656,10 +834,10 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
         }
 
       } catch (err) {
-        console.error('Scrolling to highlighted section failed', err);
+
       }
     } finally {
-      console.timeEnd && console.timeEnd(`page-${pageNumber}-scroll-effect`);
+
     }
   }, [highlightedWordIndex, words, viewport, pdfjsLib, scrollState]);
 
@@ -735,7 +913,11 @@ const MemoPdfPage = React.memo(PdfPage, (prev, next) => {
     && prev.visitedWordInfo === next.visitedWordInfo
     && prev.scrollState === next.scrollState
     && prev.selectionAnchor === next.selectionAnchor
-    && prev.highlightMode === next.highlightMode;
+    && prev.highlightMode === next.highlightMode
+    && prev.isHighlightToolActive === next.isHighlightToolActive
+    && prev.dragSelection === next.dragSelection
+    && prev.readingHighlightColor === next.readingHighlightColor
+    && prev.readingHighlightStyle === next.readingHighlightStyle;
 });
 
 const App: React.FC = () => {
@@ -752,6 +934,16 @@ const App: React.FC = () => {
   const [selectionAnchor, setSelectionAnchor] = useState<{ page: number; word: number } | null>(null); // NEW
   const [highlightMode, setHighlightMode] = useState<'word' | 'phrase'>('word'); // NEW
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null); // NEW: store raw PDF bytes
+
+  // NEW: Mouse Highlight Tool State
+  const [isHighlightToolActive, setIsHighlightToolActive] = useState(false);
+  const [dragSelection, setDragSelection] = useState<{ start: { page: number; word: number }; end: { page: number; word: number } } | null>(null);
+  const isDraggingRef = useRef(false);
+
+  // NEW: Style Menu State
+  const [readingHighlightColor, setReadingHighlightColor] = useState('#facc5a'); // Default yellow
+  const [readingHighlightStyle, setReadingHighlightStyle] = useState<'highlight' | 'underline'>('underline'); // NEW
+  const [isStyleMenuOpen, setIsStyleMenuOpen] = useState(false);
 
   // NEW: track visited/highlighted words per page (accumulative by section)
   // visitedWords[page] = { section: number | null, indices: number[] }
@@ -788,6 +980,7 @@ const App: React.FC = () => {
 
   // NEW: isAnnotating while 'S' is pressed
   const [isAnnotating, setIsAnnotating] = useState(false);
+  const isErasingRef = useRef(false);
 
   const markVisited = useCallback((page: number, word: number) => {
     setVisitedWords(prev => {
@@ -941,9 +1134,9 @@ const App: React.FC = () => {
   }, []);
 
   // batching mark requests with RAF so many quick keypresses don't cause many renders
-  const pendingMarksRef = useRef<{ page: number; word: number; annotate: boolean }[]>([]);
+  const pendingMarksRef = useRef<{ page: number; word: number; annotate: boolean | 'erase' }[]>([]);
   const markScheduledRef = useRef<number | null>(null);
-  const scheduleMark = useCallback((page: number, word: number, annotate: boolean) => {
+  const scheduleMark = useCallback((page: number, word: number, annotate: boolean | 'erase') => {
     pendingMarksRef.current.push({ page, word, annotate });
     if (markScheduledRef.current !== null) return;
     markScheduledRef.current = requestAnimationFrame(() => {
@@ -953,11 +1146,14 @@ const App: React.FC = () => {
       const keySet = new Set<string>();
       const visitUpdates: { page: number; word: number }[] = [];
       const annotUpdates: { page: number; word: number }[] = [];
+      const eraseUpdates: { page: number; word: number }[] = [];
+
       for (const m of marks) {
-        const k = `${m.page}:${m.word}:${m.annotate ? 1 : 0}`;
+        const k = `${m.page}:${m.word}:${m.annotate}`;
         if (keySet.has(k)) continue;
         keySet.add(k);
-        if (m.annotate) annotUpdates.push({ page: m.page, word: m.word });
+        if (m.annotate === 'erase') eraseUpdates.push({ page: m.page, word: m.word });
+        else if (m.annotate) annotUpdates.push({ page: m.page, word: m.word });
         else visitUpdates.push({ page: m.page, word: m.word });
       }
 
@@ -1005,12 +1201,38 @@ const App: React.FC = () => {
           return next;
         });
       }
+
+      if (eraseUpdates.length) {
+        setAnnotatedWords(prev => {
+          const next = { ...prev };
+          for (const u of eraseUpdates) {
+            const pageMap = { ...(next[u.page] || {}) };
+            const wordsOnPage = pageWords[u.page] || [];
+            const section = wordsOnPage[u.word]?.sectionIndex ?? null;
+            if (section === null || !(pageMap[section] || []).length) continue;
+
+            const filtered = (pageMap[section] || []).filter(i => i !== u.word);
+            if (filtered.length) {
+              pageMap[section] = filtered;
+            } else {
+              delete pageMap[section];
+            }
+
+            if (Object.keys(pageMap).length) {
+              next[u.page] = pageMap;
+            } else {
+              delete next[u.page];
+            }
+          }
+          return next;
+        });
+      }
     });
   }, [pageWords]);
 
   // stable double-click handler (same function identity each render)
   const handleWordDoubleClick = useCallback((p: number, idx: number) => {
-    const markFnAnnot = isAnnotating;
+    const markFnAnnot = isAnnotating ? (isErasingRef.current ? 'erase' : true) : false;
     setHighlightMode('word');
     setHighlightedPosition({ page: p, word: idx });
     // batch marking to RAF for speed
@@ -1087,9 +1309,79 @@ const App: React.FC = () => {
       setHighlightMode('word');
       // Mark the clicked word as visited so it gets the yellow highlight
       // We use isAnnotating to decide if we should also annotate (green)
-      scheduleMark(p, idx, isAnnotating);
+      scheduleMark(p, idx, isAnnotating ? (isErasingRef.current ? 'erase' : true) : false);
     }
   }, [selectionAnchor, pageWords, scheduleMark, isAnnotating]);
+
+  // NEW: Mouse Drag Handlers
+  const handleWordMouseDown = useCallback((page: number, word: number) => {
+    if (!isHighlightToolActive) return;
+    isDraggingRef.current = true;
+    setDragSelection({ start: { page, word }, end: { page, word } });
+  }, [isHighlightToolActive]);
+
+  const handleWordMouseEnter = useCallback((page: number, word: number) => {
+    if (!isHighlightToolActive || !isDraggingRef.current) return;
+    setDragSelection(prev => {
+      if (!prev) return null;
+      return { ...prev, end: { page, word } };
+    });
+  }, [isHighlightToolActive]);
+
+  // Global mouse up to finish drag
+  useEffect(() => {
+    const handleMouseUp = () => {
+      if (isDraggingRef.current && dragSelection) {
+        isDraggingRef.current = false;
+
+        // Commit the selection
+        const { start, end } = dragSelection;
+        const startPage = Math.min(start.page, end.page);
+        const endPage = Math.max(start.page, end.page);
+
+        // Determine mode based on start word
+        let isEraseMode = false;
+        const startWordItem = pageWords[start.page]?.[start.word];
+        if (startWordItem) {
+          const sec = startWordItem.sectionIndex;
+          const pageAnnots = annotatedWordsRef.current[start.page];
+          if (pageAnnots && pageAnnots[sec] && pageAnnots[sec].includes(start.word)) {
+            isEraseMode = true;
+          }
+        }
+
+        for (let pageNum = startPage; pageNum <= endPage; pageNum++) {
+          const words = pageWords[pageNum] || [];
+          if (!words.length) continue;
+
+          let startIndex = 0;
+          let endIndex = words.length - 1;
+
+          if (pageNum === startPage) {
+            if (startPage === endPage) {
+              startIndex = Math.min(start.word, end.word);
+              endIndex = Math.max(start.word, end.word);
+            } else {
+              startIndex = (start.page === pageNum) ? start.word : end.word;
+            }
+          }
+
+          if (pageNum === endPage && startPage !== endPage) {
+            endIndex = (end.page === pageNum) ? end.word : start.word;
+          }
+
+          for (let i = startIndex; i <= endIndex; i++) {
+            scheduleMark(pageNum, i, isEraseMode ? 'erase' : true); // Mark as annotated (green) or erase
+          }
+        }
+
+        setDragSelection(null);
+      }
+    };
+
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => window.removeEventListener('mouseup', handleMouseUp);
+  }, [dragSelection, pageWords, scheduleMark]);
 
   // Load PDF.js library
   useEffect(() => {
@@ -1109,7 +1401,7 @@ const App: React.FC = () => {
 
         document.head.appendChild(script);
       } catch (err) {
-        console.error('Failed to load PDF.js', err);
+
         setError('Failed to load PDF library');
       }
     };
@@ -1121,8 +1413,26 @@ const App: React.FC = () => {
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() === 's') {
+        if (isAnnotating) return; // Prevent repeat
         setIsAnnotating(true);
-        // Immediately mark the current word (or phrase) if we are on one
+
+        // Determine erase mode based on current highlighted word
+        let shouldErase = false;
+        if (highlightedPosition) {
+          const { page, word } = highlightedPosition;
+          const wordsOnPage = pageWords[page] || [];
+          const w = wordsOnPage[word];
+          if (w) {
+            const sec = w.sectionIndex;
+            const pageAnnots = annotatedWordsRef.current[page];
+            if (pageAnnots && pageAnnots[sec] && pageAnnots[sec].includes(word)) {
+              shouldErase = true;
+            }
+          }
+        }
+        isErasingRef.current = shouldErase;
+
+        // Immediately mark/unmark the current word (or phrase) if we are on one
         if (highlightedPosition) {
           const { page, word } = highlightedPosition;
 
@@ -1134,13 +1444,13 @@ const App: React.FC = () => {
               // Mark all words in the current sentence
               for (let i = 0; i < wordsOnPage.length; i++) {
                 if (wordsOnPage[i].sentenceIndex === currentSentenceIndex) {
-                  scheduleMark(page, i, true);
+                  scheduleMark(page, i, shouldErase ? 'erase' : true);
                 }
               }
             }
           } else {
             // Word mode: just mark the current word
-            scheduleMark(page, word, true);
+            scheduleMark(page, word, shouldErase ? 'erase' : true);
           }
         }
       }
@@ -1148,6 +1458,7 @@ const App: React.FC = () => {
     const up = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() === 's') {
         setIsAnnotating(false);
+        isErasingRef.current = false;
       }
     };
     window.addEventListener('keydown', down);
@@ -1156,7 +1467,7 @@ const App: React.FC = () => {
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
     };
-  }, [highlightedPosition, scheduleMark, highlightMode, pageWords]);
+  }, [highlightedPosition, scheduleMark, highlightMode, pageWords, isAnnotating]);
 
   const rafRef = useRef<number | null>(null);
   const scheduleSetHighlighted = useCallback((next: { page: number; word: number }) => {
@@ -1176,7 +1487,7 @@ const App: React.FC = () => {
 
       // choose marking function based on annotation mode
       // NOTE: we batch marking via scheduleMark for performance
-      const markAnnot = isAnnotating;
+      const markAnnot = isAnnotating ? (isErasingRef.current ? 'erase' : true) : false;
 
       // helper: clear visited highlights for sections earlier than targetSection.
       const clearPreviousVisited = (targetPage: number, targetSection: number | null) => {
@@ -1232,15 +1543,44 @@ const App: React.FC = () => {
         let nextWordIndex = -1;
 
         if (highlightMode === 'phrase') {
-          // If we were in phrase mode, ArrowRight should jump to the start of the NEXT phrase (in word mode)
+          // If we were in phrase mode, ArrowRight should move to the start of the NEXT phrase and switch to word mode
           const currentSentenceIndex = currentWord.sentenceIndex;
-          // Find the first word of the next sentence
+          const currentSectionIndex = currentWord.sectionIndex;
+          let nextWordIndex = -1;
+
+          // Find the first word of the next sentence OR next section part of same sentence
           for (let i = word + 1; i < wordsOnPage.length; i++) {
-            if (wordsOnPage[i].sentenceIndex !== currentSentenceIndex) {
+            if (wordsOnPage[i].sentenceIndex > currentSentenceIndex ||
+              (wordsOnPage[i].sentenceIndex === currentSentenceIndex && wordsOnPage[i].sectionIndex !== currentSectionIndex)) {
               nextWordIndex = i;
               break;
             }
           }
+
+          if (nextWordIndex !== -1) {
+            const next = { page, word: nextWordIndex };
+            scheduleSetHighlighted(next);
+            scheduleMark(next.page, next.word, markAnnot);
+            return;
+          }
+
+          // Go to next page's first sentence
+          for (let p = page + 1; p <= pdfDoc.numPages; p++) {
+            const wordsNextPage = pageWords[p] || [];
+            if (wordsNextPage.length) {
+              clearPreviousVisited(p, wordsNextPage[0].sectionIndex);
+              const next = { page: p, word: 0 };
+              scheduleSetHighlighted(next);
+              scheduleMark(next.page, next.word, markAnnot);
+              pageRefs.current[p - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              return;
+            }
+          }
+
+          // Fallback: stay on current word if no next phrase found
+          scheduleSetHighlighted({ page, word });
+          scheduleMark(page, word, markAnnot);
+          return;
         } else {
           // Word Mode Navigation
           const nav = pageNavRef.current[page];
@@ -1295,7 +1635,7 @@ const App: React.FC = () => {
 
       } else if (event.key === 'Tab') {
         event.preventDefault();
-        setHighlightMode('word');
+        setHighlightMode('phrase');
 
         if (event.shiftKey) {
           // Shift+Tab: Previous Phrase
@@ -1421,18 +1761,21 @@ const App: React.FC = () => {
           if (!currentWord) return;
 
           const currentSentenceIndex = currentWord.sentenceIndex;
+          const currentSectionIndex = currentWord.sectionIndex;
 
           // Check if current phrase is partially highlighted
           const currentSentenceIndices: number[] = [];
           // Scan backwards
           for (let i = word; i >= 0; i--) {
-            if (wordsOnPage[i].sentenceIndex === currentSentenceIndex) currentSentenceIndices.push(i);
-            else break;
+            if (wordsOnPage[i].sentenceIndex === currentSentenceIndex && wordsOnPage[i].sectionIndex === currentSectionIndex) {
+              currentSentenceIndices.push(i);
+            } else break;
           }
           // Scan forwards
           for (let i = word + 1; i < wordsOnPage.length; i++) {
-            if (wordsOnPage[i].sentenceIndex === currentSentenceIndex) currentSentenceIndices.push(i);
-            else break;
+            if (wordsOnPage[i].sentenceIndex === currentSentenceIndex && wordsOnPage[i].sectionIndex === currentSectionIndex) {
+              currentSentenceIndices.push(i);
+            } else break;
           }
 
           let markedCount = 0;
@@ -1465,9 +1808,10 @@ const App: React.FC = () => {
           }
           let nextWordIndex = -1;
 
-          // Find the first word of the next sentence
+          // Find the first word of the next sentence OR next section part of same sentence
           for (let i = word + 1; i < wordsOnPage.length; i++) {
-            if (wordsOnPage[i].sentenceIndex > currentSentenceIndex) {
+            if (wordsOnPage[i].sentenceIndex > currentSentenceIndex ||
+              (wordsOnPage[i].sentenceIndex === currentSentenceIndex && wordsOnPage[i].sectionIndex !== currentSectionIndex)) {
               nextWordIndex = i;
               break;
             }
@@ -1696,7 +2040,7 @@ const App: React.FC = () => {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [pdfDoc, highlightedPosition, pageWordCounts, pageWords, markVisited, markAnnotated, unmarkVisited, unmarkAnnotated, isAnnotating, scheduleSetHighlighted, scheduleMark]);
+  }, [pdfDoc, highlightedPosition, pageWordCounts, pageWords, markVisited, markAnnotated, unmarkVisited, unmarkAnnotated, isAnnotating, scheduleSetHighlighted, scheduleMark, highlightMode]);
 
   const processFile = async (file: File) => {
     if (!pdfjsLib) {
@@ -1736,7 +2080,7 @@ const App: React.FC = () => {
           setIsLoading(false);
         } catch (err) {
           setError('Error loading PDF document. The file might be corrupted or protected.');
-          console.error(err);
+
           setIsLoading(false);
         }
       };
@@ -1747,7 +2091,7 @@ const App: React.FC = () => {
       reader.readAsArrayBuffer(file);
     } catch (err) {
       setError('Error loading PDF document.');
-      console.error(err);
+
       setIsLoading(false);
     }
   };
@@ -1788,34 +2132,124 @@ const App: React.FC = () => {
         const page = pages[pageNum - 1]; // 0-based
         const wordsOnPage = pageWords[pageNum] || [];
 
-        // Group adjacent words to form rectangles (optimization)
-        // For now, drawing individual rectangles for each word is simpler and safer for layout
+        // 1. Collect all highlighted word rects on this page
+        const rawRects: { x: number; y: number; width: number; height: number; lineY: number }[] = [];
 
         for (const idx of indices) {
           const word = wordsOnPage[idx];
           if (!word) continue;
 
           // Word transform: [scaleX, skewY, skewX, scaleY, x, y]
-          // x, y are in PDF user space (bottom-left origin usually)
           const x = word.transform[4];
           const y = word.transform[5];
-          const width = word.width; // In PDF units
-          const height = word.height; // In PDF units
+          const width = word.width;
+          const height = word.height;
 
-          // Calculate rectangle coordinates
-          // Based on visual rendering: top = y - height * 0.85 (viewport, y down)
-          // In PDF (y up): top = y + height * 0.85
-          // Bottom = y - height * 0.35
-          // Height = height * 1.2
+          // In PDF user space (y increases upwards), y is usually the baseline.
+          // We want the bounding box.
+          // Based on visual rendering logic: top = y - height * 0.85 (in viewport coords where y is down)
+          // In PDF coords (y up): 
+          // The word.transform[5] (y) is the baseline.
+          // We need to cover the text.
+          // Let's approximate the text box relative to baseline:
+          // Bottom ≈ y - height * 0.2
+          // Top ≈ y + height * 0.8
 
-          page.drawRectangle({
+          // Let's use the same logic as the visual renderer but adapted for PDF coords
+          // Visual: top = y - height * 0.85, height = height * 1.2
+          // So visual bottom = y - height * 0.85 + height * 1.2 = y + height * 0.35
+          // In PDF (y up), this flips.
+          // PDF Bottom = y - height * 0.35
+          // PDF Top = y + height * 0.85
+
+          const pdfBottom = y - (height * 0.35);
+          const pdfHeight = height * 1.2;
+
+          rawRects.push({
             x: x,
-            y: y - (height * 0.35),
+            y: pdfBottom,
             width: width,
-            height: height * 1.2,
-            color: rgb(0.56, 0.93, 0.56), // Light green
-            opacity: 0.45,
+            height: pdfHeight,
+            lineY: Math.round(y) // Use baseline for line grouping
           });
+        }
+
+        if (rawRects.length === 0) continue;
+
+        // 2. Merge adjacent rects into lines
+        // Sort by line (Y) then X
+        // Note: In PDF, higher Y is higher up. So sorting by Y descending might make sense for reading order,
+        // but for grouping, we just need to group similar Ys.
+        rawRects.sort((a, b) => (b.lineY - a.lineY) || (a.x - b.x));
+
+        const mergedRects: typeof rawRects = [];
+        const lineTolerance = 5; // Tolerance for same line
+        const gapTolerance = 10; // Tolerance for gap between words
+
+        let current = rawRects[0];
+        for (let i = 1; i < rawRects.length; i++) {
+          const next = rawRects[i];
+
+          // Check if on same line
+          if (Math.abs(next.lineY - current.lineY) <= lineTolerance) {
+            // Check if adjacent (next.x should be close to current.x + current.width)
+            const currentRight = current.x + current.width;
+            // Allow some overlap or small gap
+            if (next.x <= currentRight + gapTolerance) {
+              // Merge
+              const newX = Math.min(current.x, next.x);
+              const newRight = Math.max(currentRight, next.x + next.width);
+              const newBottom = Math.min(current.y, next.y); // min y is lower bottom
+              const newTop = Math.max(current.y + current.height, next.y + next.height);
+
+              current = {
+                x: newX,
+                y: newBottom,
+                width: newRight - newX,
+                height: newTop - newBottom,
+                lineY: current.lineY // Keep representative lineY
+              };
+              continue;
+            }
+          }
+
+          mergedRects.push(current);
+          current = next;
+        }
+        mergedRects.push(current);
+
+        // 3. Create Highlight Annotations for each merged rect
+        for (const rect of mergedRects) {
+          // QuadPoints are 8 numbers: x1 y1 x2 y2 x3 y3 x4 y4
+          // (BL, BR, TR, TL) - Counter-clockwise order starting from Bottom-Left? 
+          // Spec says: "The coordinates of the four corners of the quadrilateral are specified in the order lower-left, lower-right, upper-right, and upper-left."
+          // BL: (x, y)
+          // BR: (x + w, y)
+          // TR: (x + w, y + h)
+          // TL: (x, y + h)
+
+          const quadPoints = [
+            rect.x, rect.y,                                // BL
+            rect.x + rect.width, rect.y,                   // BR
+            rect.x + rect.width, rect.y + rect.height,     // TR
+            rect.x, rect.y + rect.height                   // TL
+          ];
+
+          // Create the annotation dictionary
+          const highlightAnnot = pdfDocLib.context.obj({
+            Type: 'Annot',
+            Subtype: 'Highlight',
+            Rect: [rect.x, rect.y, rect.x + rect.width, rect.y + rect.height], // Bounding box
+            QuadPoints: quadPoints,
+            C: [0.56, 0.93, 0.56], // RGB color (Light Green)
+            F: 4, // Flags: 4 = Print
+          });
+
+          // Register the annotation to get a reference
+          const highlightAnnotRef = pdfDocLib.context.register(highlightAnnot);
+
+          // Add annotation to page
+          page.node.addAnnot(highlightAnnotRef);
         }
       }
 
@@ -1831,7 +2265,7 @@ const App: React.FC = () => {
       URL.revokeObjectURL(url);
 
     } catch (err) {
-      console.error('Failed to save PDF', err);
+      console.error('Error saving PDF:', err);
       alert('Failed to save PDF with highlights.');
     }
   };
@@ -1896,6 +2330,78 @@ const App: React.FC = () => {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
               </svg>
             </button>
+            <button
+              onClick={() => setIsHighlightToolActive(!isHighlightToolActive)}
+              className={`${isHighlightToolActive ? 'bg-yellow-500' : 'bg-blue-600'} text-white p-4 rounded-full shadow-lg hover:opacity-90 transition-colors flex items-center justify-center`}
+              title={isHighlightToolActive ? "Disable Highlight Tool" : "Enable Highlight Tool"}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Style Menu Button */}
+          <div className="fixed bottom-8 right-24 z-50">
+            <button
+              onClick={() => setIsStyleMenuOpen(!isStyleMenuOpen)}
+              className="bg-indigo-600 text-white p-4 rounded-full shadow-lg hover:bg-indigo-700 transition-colors flex items-center justify-center"
+              title="Style Settings"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" />
+              </svg>
+            </button>
+
+            {isStyleMenuOpen && (
+              <div className="absolute bottom-16 right-0 bg-white p-4 rounded-lg shadow-xl border border-gray-200 w-64 mb-2">
+                <h3 className="font-bold text-gray-700 mb-3">Highlight Styles</h3>
+
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-600 mb-1">Reading Highlight</label>
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    {[
+                      { label: 'Yellow', value: '#facc5a' },
+                      { label: 'Green', value: '#7dc868' },
+                      { label: 'Blue', value: '#5c9aff' },
+                      { label: 'Red', value: '#ff6b6b' },
+                      { label: 'Purple', value: '#c885da' },
+                    ].map((color) => (
+                      <button
+                        key={color.value}
+                        onClick={() => setReadingHighlightColor(color.value)}
+                        className={`w-8 h-8 rounded-full border-2 transition-transform ${readingHighlightColor === color.value
+                          ? 'border-gray-600 scale-110'
+                          : 'border-transparent hover:scale-105'
+                          }`}
+                        style={{ backgroundColor: color.value }}
+                        title={color.label}
+                        aria-label={color.label}
+                      />
+                    ))}
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setReadingHighlightStyle('highlight')}
+                      className={`px-3 py-1 text-xs rounded border ${readingHighlightStyle === 'highlight' ? 'bg-blue-100 border-blue-500 text-blue-700' : 'bg-white border-gray-300 text-gray-600'}`}
+                    >
+                      Highlight
+                    </button>
+                    <button
+                      onClick={() => setReadingHighlightStyle('underline')}
+                      className={`px-3 py-1 text-xs rounded border ${readingHighlightStyle === 'underline' ? 'bg-blue-100 border-blue-500 text-blue-700' : 'bg-white border-gray-300 text-gray-600'}`}
+                    >
+                      Underline
+                    </button>
+                  </div>
+                </div>
+
+                <div className="text-xs text-gray-400 pt-2 border-t">
+                  Customize the style for your reading progress.
+                </div>
+              </div>
+            )}
           </div>
           {Array.from({ length: pdfDoc.numPages }, (_, i) => {
             const annotatedIndices = annotatedIndicesMap[i + 1] || [];
@@ -1917,6 +2423,12 @@ const App: React.FC = () => {
                 selectionAnchor={selectionAnchor}
                 scrollState={scrollState}
                 highlightMode={highlightMode}
+                isHighlightToolActive={isHighlightToolActive}
+                dragSelection={dragSelection}
+                onWordMouseDown={handleWordMouseDown}
+                onWordMouseEnter={handleWordMouseEnter}
+                readingHighlightColor={readingHighlightColor}
+                readingHighlightStyle={readingHighlightStyle}
               />
             );
           })}

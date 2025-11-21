@@ -570,6 +570,8 @@ const App: React.FC = () => {
       const { page, word } = highlightedPosition;
       const wordsOnPage = pageWords[page] || [];
 
+
+
       // choose marking function based on annotation mode
       // NOTE: we batch marking via scheduleMark for performance
       const markAnnot = isAnnotating ? (isErasingRef.current ? 'erase' : true) : false;
@@ -633,10 +635,10 @@ const App: React.FC = () => {
           const currentSectionIndex = currentWord.sectionIndex;
           let nextWordIndex = -1;
 
-          // Find the first word of the next sentence OR next section part of same sentence
+          // Find the first word of the next sentence (ignore section breaks within same sentence)
           for (let i = word + 1; i < wordsOnPage.length; i++) {
-            if (wordsOnPage[i].sentenceIndex > currentSentenceIndex ||
-              (wordsOnPage[i].sentenceIndex === currentSentenceIndex && wordsOnPage[i].sectionIndex !== currentSectionIndex)) {
+            if (wordsOnPage[i].sentenceIndex > currentSentenceIndex) {
+
               nextWordIndex = i;
               break;
             }
@@ -720,6 +722,7 @@ const App: React.FC = () => {
 
       } else if (event.key === 'Tab') {
         event.preventDefault();
+
         setHighlightMode('phrase');
 
         if (event.shiftKey) {
@@ -893,10 +896,9 @@ const App: React.FC = () => {
           }
           let nextWordIndex = -1;
 
-          // Find the first word of the next sentence OR next section part of same sentence
+          // Find the first word of the next sentence (ignore section breaks within same sentence)
           for (let i = word + 1; i < wordsOnPage.length; i++) {
-            if (wordsOnPage[i].sentenceIndex > currentSentenceIndex ||
-              (wordsOnPage[i].sentenceIndex === currentSentenceIndex && wordsOnPage[i].sectionIndex !== currentSectionIndex)) {
+            if (wordsOnPage[i].sentenceIndex > currentSentenceIndex) {
               nextWordIndex = i;
               break;
             }

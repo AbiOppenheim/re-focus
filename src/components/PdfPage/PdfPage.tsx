@@ -510,8 +510,15 @@ const PdfPage = React.forwardRef<HTMLDivElement, {
       if (highlightedWordIndex !== null && words[highlightedWordIndex]) {
         const wordItem = words[highlightedWordIndex];
 
-        // Skip highlighting current word if it is a page number (redundant if filtered)
-        // if (!wordItem.isPageNumber) {
+        let highlightedText = wordItem.str;
+        if (highlightMode === 'phrase') {
+          const currentSentenceIndex = wordItem.sentenceIndex;
+          const sentenceWords = words.filter(w => w.sentenceIndex === currentSentenceIndex);
+          highlightedText = sentenceWords.map(w => w.str).join('');
+        }
+
+
+
         // Parse color for current selection
         const hex = readingHighlightColor.replace('#', '');
         const rVal = parseInt(hex.substring(0, 2), 16);
